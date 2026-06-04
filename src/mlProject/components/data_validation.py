@@ -10,18 +10,22 @@ class DataValidation:
         self.config = config
 
 
-    def validate_all_columns(self)-> bool:
+    def validate_all_columns(self) -> bool:
         try:
             validation_status = None
 
             data = pd.read_csv(self.config.unzip_data_dir)
-            all_cols = list(data.columns)
-            # print(f"the columns are shown below from the dataset: {all_cols}")
-            # next in future we can add more validation like datatype check, null value check etc(keep in mind)
+        except FileNotFoundError:
+            logger.error(f"Data file not found: {self.config.unzip_data_dir}")
+            raise
+        except Exception as e:
+            logger.exception(f"Failed to read data file: {self.config.unzip_data_dir}")
+            raise
 
+        try:
+            all_cols = list(data.columns)
             all_schema = self.config.all_schema.keys()
 
-            
             for col in all_cols:
                 if col not in all_schema:
                     validation_status = False
@@ -33,6 +37,7 @@ class DataValidation:
                         f.write(f"Validation status: {validation_status}")
 
             return validation_status
-        
+
         except Exception as e:
-            raise e
+            logger.exception("Column validation failed")
+            raise
