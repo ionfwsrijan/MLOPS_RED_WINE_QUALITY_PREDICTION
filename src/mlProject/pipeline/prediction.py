@@ -5,6 +5,7 @@ from pathlib import Path
 from mlProject.components.data_transformation import NUMERIC_FEATURES
 from mlProject.config.configuration import ConfigurationManager
 from mlProject.utils.common import load_env_file
+from mlProject.utils.model_registry import get_production_model_path, load_registry
 
 class PredictionPipeline:
     def __init__(self, model_path: Path = None):
