@@ -17,14 +17,13 @@ class DataTransformationSplitTest(unittest.TestCase):
             data_path = root_dir / "wine.csv"
             rows = []
             for quality in (5, 6):
-                for index in range(20):
-                    rows.append(
-                        {
-                            "fixed acidity": index,
-                            "volatile acidity": index / 10,
-                            "quality": quality,
-                        }
-                    )
+                for i in range(20):
+                    rows.append({
+                        "fixed acidity": i, "volatile acidity": i/10, "citric acid": i/20,
+                        "residual sugar": i, "chlorides": i/100, "free sulfur dioxide": i,
+                        "total sulfur dioxide": i*2, "density": 0.99 + i/1000, "pH": 3.0 + i/100,
+                        "sulphates": i/20, "alcohol": 9.0 + i/10, "quality": quality,
+                    })
             pd.DataFrame(rows).to_csv(data_path, index=False)
 
             config = DataTransformationConfig(
