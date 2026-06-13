@@ -13,6 +13,8 @@ Additional improvements:
   - training_log capped at MAX_LOG_LINES to prevent unbounded memory growth
 """
 
+import functools
+import json
 import os
 import secrets
 import subprocess
@@ -91,6 +93,23 @@ def _verify_train_token() -> bool:
         or request.headers.get("X-Train-Token", "")
     )
     return secrets.compare_digest(supplied.encode(), expected.encode())
+
+
+def require_admin_token(f):
+    """Decorator to require admin token for model management operations."""
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        token = (request.headers.get('X-Admin-Token')
+                 or request.headers.get('X-Train-Token')
+                 or request.args.get("token", ""))
+        expected = os.environ.get("ADMIN_TOKEN") or os.environ.get("TRAIN_SECRET", "")
+        if not expected:
+            return jsonify({"error": "Admin token not configured on server"}), 500
+        if not token or not secrets.compare_digest(token.encode(), expected.encode()):
+            return jsonify({"error": "Invalid or missing admin token"}), 401
+        app.logger.info(f"Admin operation {f.__name__} by {request.remote_addr}")
+        return f(*args, **kwargs)
+    return decorated
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +319,7 @@ def index():
 
 
 @app.route('/models', methods=['GET'])
+@require_admin_token
 def list_models():
     """List all registered model versions."""
     registry_path = Path('artifacts/model_registry.json')
@@ -308,13 +328,13 @@ def list_models():
 
 
 @app.route('/models/compare', methods=['GET'])
+@require_admin_token
 def compare_models():
     """Show metric diff between current and previous model."""
     comparison_path = Path('artifacts/model_evaluation/metrics_comparison.json')
     if comparison_path.exists():
         try:
             with open(comparison_path) as f:
-                import json
                 comparison = json.load(f)
             return jsonify(comparison)
         except Exception as e:
@@ -323,18 +343,26 @@ def compare_models():
 
 
 @app.route('/models/rollback', methods=['POST'])
+@require_admin_token
 def rollback_model():
     """Rollback production alias to a specified version and restore the model file."""
     version_id = request.json.get("version_id")
     if not version_id:
         return jsonify({"error": "version_id is required"}), 400
     registry_path = Path('artifacts/model_registry.json')
+    app.logger.warning(
+        f"Model rollback initiated: target version={version_id}, "
+        f"requested by={request.remote_addr}"
+    )
     if rollback_to_version(registry_path, version_id):
+        app.logger.warning(f"Model rollback SUCCESS: rolled back to version {version_id}")
         return jsonify({"message": f"Rolled back to version {version_id} and restored model file"})
+    app.logger.error(f"Model rollback FAILED: version {version_id} not found")
     return jsonify({"error": f"Rollback failed: version {version_id} not found or model file missing"}), 404
 
 
 @app.route('/models/<version_id>', methods=['GET'])
+@require_admin_token
 def get_model_version(version_id):
     """View metadata for a specific version."""
     registry_path = Path('artifacts/model_registry.json')
