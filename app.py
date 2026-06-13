@@ -1,18 +1,24 @@
 """
 Wine Quality Prediction - Flask Application
 
-Security hardening (Issue 1 fix):
+Security hardening:
   - /train requires a secret token via TRAIN_SECRET env var (fail-closed if unset)
   - threading.Lock() replaces the bare boolean race condition
   - Flask-Limiter caps /train at 10 req/hour per IP, /train/status at 60/min
   - /train/status also requires the same token
+  - /models/* endpoints require ADMIN_TOKEN (settable via env var or X-Admin-Token header)
+  - /models/rollback is rate-limited to 10 req/hour per IP
+  - /models/list, /models/compare, /models/<version_id> are rate-limited to 30 req/min
   - debug mode is controlled by FLASK_DEBUG env var, defaults to off in production
+  - All admin actions are logged with caller IP and details
 
 Additional improvements:
   - /health endpoint for uptime monitoring
   - training_log capped at MAX_LOG_LINES to prevent unbounded memory growth
 """
 
+import functools
+import json
 import os
 import secrets
 import subprocess
@@ -91,6 +97,38 @@ def _verify_train_token() -> bool:
         or request.headers.get("X-Train-Token", "")
     )
     return secrets.compare_digest(supplied.encode(), expected.encode())
+
+
+def get_current_production_version(registry_path):
+    """Get the current production version ID from the registry."""
+    registry = load_registry(registry_path)
+    return registry.get("production")
+
+
+def log_admin_action(action, details=""):
+    """Log an admin action with caller IP and details."""
+    app.logger.warning(
+        f"Admin action: {action}, "
+        f"caller={request.remote_addr}, "
+        f"details={details}"
+    )
+
+
+def require_admin_token(f):
+    """Decorator to require admin token for model management operations."""
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        token = (request.headers.get('X-Admin-Token')
+                 or request.headers.get('X-Train-Token')
+                 or request.args.get("token", ""))
+        expected = os.environ.get("ADMIN_TOKEN") or os.environ.get("TRAIN_SECRET", "")
+        if not expected:
+            return jsonify({"error": "Admin token not configured on server"}), 500
+        if not token or not secrets.compare_digest(token.encode(), expected.encode()):
+            return jsonify({"error": "Invalid or missing admin token"}), 401
+        log_admin_action(f.__name__)
+        return f(*args, **kwargs)
+    return decorated
 
 
 # ---------------------------------------------------------------------------
@@ -300,48 +338,68 @@ def index():
 
 
 @app.route('/models', methods=['GET'])
+@limiter.limit("30 per minute")
+@require_admin_token
 def list_models():
     """List all registered model versions."""
     registry_path = Path('artifacts/model_registry.json')
     registry = load_registry(registry_path)
+    log_admin_action("list_models", f"versions_count={len(registry.get('versions', []))}")
     return jsonify(registry)
 
 
 @app.route('/models/compare', methods=['GET'])
+@limiter.limit("30 per minute")
+@require_admin_token
 def compare_models():
     """Show metric diff between current and previous model."""
     comparison_path = Path('artifacts/model_evaluation/metrics_comparison.json')
     if comparison_path.exists():
         try:
             with open(comparison_path) as f:
-                import json
                 comparison = json.load(f)
+            log_admin_action("compare_models", "comparison_data_returned")
             return jsonify(comparison)
         except Exception as e:
+            log_admin_action("compare_models", f"read_error={str(e)}")
             return jsonify({"error": str(e)}), 500
+    log_admin_action("compare_models", "no_comparison_data")
     return jsonify({"message": "No comparison data available"})
 
 
 @app.route('/models/rollback', methods=['POST'])
+@limiter.limit("10 per hour")
+@require_admin_token
 def rollback_model():
     """Rollback production alias to a specified version and restore the model file."""
     version_id = request.json.get("version_id")
     if not version_id:
         return jsonify({"error": "version_id is required"}), 400
     registry_path = Path('artifacts/model_registry.json')
+    current_prod = get_current_production_version(registry_path)
+    log_admin_action(
+        "rollback_initiated",
+        f"target_version={version_id}, current_production={current_prod}"
+    )
     if rollback_to_version(registry_path, version_id):
+        log_admin_action("rollback_success", f"rolled_back_to={version_id}")
         return jsonify({"message": f"Rolled back to version {version_id} and restored model file"})
+    log_admin_action("rollback_failed", f"version_{version_id}_not_found")
     return jsonify({"error": f"Rollback failed: version {version_id} not found or model file missing"}), 404
 
 
 @app.route('/models/<version_id>', methods=['GET'])
+@limiter.limit("30 per minute")
+@require_admin_token
 def get_model_version(version_id):
     """View metadata for a specific version."""
     registry_path = Path('artifacts/model_registry.json')
     registry = load_registry(registry_path)
     for v in registry.get("versions", []):
         if v.get("id") == version_id:
+            log_admin_action("get_model_version", f"version_id={version_id}")
             return jsonify(v)
+    log_admin_action("get_model_version", f"version_{version_id}_not_found")
     return jsonify({"error": f"Version {version_id} not found"}), 404
 
 
